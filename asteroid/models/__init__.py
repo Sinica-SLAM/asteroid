@@ -9,6 +9,7 @@ from .dptnet import DPTNet
 from .lstm_tasnet import LSTMTasNet
 from .demask import DeMask
 from .x_umx import XUMX
+from .mu_x_umx import MU_XUMX
 
 # Sharing-related
 from .publisher import save_publishable, upload_publishable
@@ -24,6 +25,7 @@ __all__ = [
     "DCUNet",
     "DCCRNet",
     "XUMX",
+    "MU_XUMX",    
     "save_publishable",
     "upload_publishable",
 ]

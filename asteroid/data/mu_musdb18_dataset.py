@@ -6,7 +6,7 @@ import tqdm
 import soundfile as sf
 
 
-class MUSDB18Dataset(torch.utils.data.Dataset):
+class MU_MUSDB18Dataset(torch.utils.data.Dataset):
     """MUSDB18 music separation dataset
 
     The dataset consists of 150 full lengths music tracks (~10h duration) of
@@ -122,10 +122,23 @@ class MUSDB18Dataset(torch.utils.data.Dataset):
         self.tracks = list(self.get_tracks())
         if not self.tracks:
             raise RuntimeError("No tracks found.")
+        
+        # Load mu-vectors 
+        self.train_mu_vectors = torch.load(Path(self.root, "mu_vector/train_mu_vectors.pt"),map_location='cpu')
+        self.valid_mu_vectors = torch.load(Path(self.root, "mu_vector/valid_mu_vectors.pt"),map_location='cpu')
+        self.test_mu_vectors = torch.load(Path(self.root, "mu_vector/test_mu_vectors.pt"),map_location='cpu')
+        self.mu_vectors_list = self.train_mu_vectors + self.valid_mu_vectors + self.test_mu_vectors
+        self.mu_vectors_dict = { list(mu_vector.keys())[0]:list(mu_vector.values())[0] for mu_vector in self.mu_vectors_list }
+        
+        # One of the training data lacks a bass track. (bass/The Districts - Vermont) 
+        self.bass_mean = torch.mean(torch.cat([list(train_mu.values())[0] for train_mu in self.train_mu_vectors if "bass" in list(train_mu.keys())[0]],dim = 0),dim=0,keepdim=True)
 
     def __getitem__(self, index):
         # assemble the mixture of target and interferers
         audio_sources = {}
+
+        # mu vectors 
+        mu_vectors = {}
 
         # get track_id
         track_id = index // self.samples_per_track
@@ -134,6 +147,8 @@ class MUSDB18Dataset(torch.utils.data.Dataset):
         else:
             start = 0
 
+        song_name = str(self.tracks[track_id]["path"]).split("/")[-1]
+        # print('song_name',song_name)
         # load sources
         for source in self.sources:
             # optionally select a random track for each source
@@ -166,13 +181,27 @@ class MUSDB18Dataset(torch.utils.data.Dataset):
             audio = self.source_augmentations(audio)
             audio_sources[source] = audio
 
+            # Extract mu-vector with respect to diffrenet sources
+            try:
+                mu_vectors[source] = self.mu_vectors_dict[source + "--" + song_name + ".wav"]
+
+            except KeyError:
+                if song_name == "The Districts - Vermont" and source == "bass":
+                    mu_vectors[source] = self.bass_mean
+        
+        # Concat mu-vectors
+        mu_vectors = torch.stack(
+                [mu_vector for name, mu_vector in mu_vectors.items()], dim=0
+            )
+
         # apply linear mix over source index=0
         audio_mix = torch.stack(list(audio_sources.values())).sum(0)
         if self.targets:
             audio_sources = torch.stack(
                 [wav for src, wav in audio_sources.items() if src in self.targets], dim=0
             )
-        return audio_mix, audio_sources
+
+        return audio_mix, audio_sources, mu_vectors
 
     def __len__(self):
         return len(self.tracks) * self.samples_per_track
@@ -182,9 +211,9 @@ class MUSDB18Dataset(torch.utils.data.Dataset):
         p = Path(self.root, self.split)
 
         # Random toy
-        import random
+        # import random
         files = list(p.iterdir())
-        files = random.sample(files,20)
+        # files = random.sample(files,20)
 
         for track_path in tqdm.tqdm(files):
             if track_path.is_dir():
@@ -222,6 +251,5 @@ class MUSDB18Dataset(torch.utils.data.Dataset):
         infos["task"] = "enhancement"
         infos["licenses"] = [musdb_license]
         return infos
-
 
 musdb_license = dict()

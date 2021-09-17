@@ -8,7 +8,7 @@ import norbert
 from pathlib import Path
 import scipy.signal
 import resampy
-from asteroid.models import XUMX
+from asteroid.models import MU_XUMX
 from asteroid.complex_nn import torch_complex_from_magphase
 import os
 import warnings
@@ -17,7 +17,7 @@ import sys
 
 def load_model(model_name, device="cpu"):
     print("Loading model from: {}".format(model_name), file=sys.stderr)
-    model = XUMX.from_pretrained(model_name)
+    model = MU_XUMX.from_pretrained(model_name)
     model.eval()
     model.to(device)
     return model, model.sources
@@ -166,7 +166,7 @@ def eval_main(
     alpha=1.0,
     softmask=False,
     residual_model=False,
-    model_name="xumx",
+    model_name="mu_xumx",
     outdir=None,
     start=0.0,
     duration=-1.0,
@@ -176,7 +176,7 @@ def eval_main(
     model_name = os.path.abspath(model_name)
     if not (os.path.exists(model_name)):
         outdir = os.path.abspath("./results_using_pre-trained")
-        model_name = "r-sawata/XUMX_MUSDB18_music_separation"
+        model_name = "r-sawata/MU_XUMX_MUSDB18_music_separation"
     else:
         outdir = os.path.join(
             os.path.abspath(outdir),

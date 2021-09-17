@@ -14,8 +14,8 @@ from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 
 from asteroid.engine.system import System
 from asteroid.engine.optimizers import make_optimizer
-from asteroid.models import XUMX
-from asteroid.models.x_umx import _STFT, _Spectrogram
+from asteroid.models import MU_XUMX
+from asteroid.models.mu_x_umx import _STFT, _Spectrogram
 from asteroid.losses import singlesrc_mse
 from torch.nn.modules.loss import _Loss
 from torch import nn
@@ -53,7 +53,7 @@ def get_statistics(args, dataset):
     dataset_scaler.segment = False
     pbar = tqdm.tqdm(range(len(dataset_scaler)))
     for ind in pbar:
-        x, _ = dataset_scaler[ind]
+        x, _, _ = dataset_scaler[ind]
         pbar.set_description("Compute dataset statistics")
         X = spec(x[None, ...])[0]
         scaler.partial_fit(np.squeeze(X))
@@ -292,8 +292,8 @@ class MultiDomainLoss(_Loss):
         return loss
 
 
-class XUMXManager(System):
-    """A class for X-UMX systems inheriting the base system class of lightning.
+class MU_XUMXManager(System):
+    """A class for MU_X-UMX systems inheriting the base system class of lightning.
     The difference from base class is specialized for X-UMX to calculate
     validation loss preventing the GPU memory over flow.
 
@@ -335,6 +335,53 @@ class XUMXManager(System):
         super().__init__(model, optimizer, loss_func, train_loader, val_loader, scheduler, config)
         self.val_dur_samples = model.sample_rate * val_dur
 
+    def common_step(self, batch, batch_nb, train=True):
+        """Common forward step between training and validation.
+
+        The function of this method is to unpack the data given by the loader,
+        forward the batch through the model and compute the loss.
+        Pytorch-lightning handles all the rest.
+
+        Args:
+            batch: the object returned by the loader (a list of torch.Tensor
+                in most cases) but can be something else.
+            batch_nb (int): The number of the batch in the epoch.
+            train (bool): Whether in training mode. Needed only if the training
+                and validation steps are fundamentally different, otherwise,
+                pytorch-lightning handles the usual differences.
+
+        Returns:
+            :class:`torch.Tensor` : The loss value on this batch.
+
+        .. note::
+            This is typically the method to overwrite when subclassing
+            ``System``. If the training and validation steps are somehow
+            different (except for ``loss.backward()`` and ``optimzer.step()``),
+            the argument ``train`` can be used to switch behavior.
+            Otherwise, ``training_step`` and ``validation_step`` can be overwriten.
+        """
+        inputs, targets, mu_vectors = batch
+        est_targets = self(inputs,mu_vectors)
+        loss = self.loss_func(est_targets, targets)
+        return loss
+
+    def training_step(self, batch, batch_nb):
+        """Pass data through the model and compute the loss.
+
+        Backprop is **not** performed (meaning PL will do it for you).
+
+        Args:
+            batch: the object returned by the loader (a list of torch.Tensor
+                in most cases) but can be something else.
+            batch_nb (int): The number of the batch in the epoch.
+
+        Returns:
+            torch.Tensor, the value of the loss.
+        """
+        loss = self.common_step(batch, batch_nb, train=True)
+        self.log("loss", loss, logger=True)
+        return loss
+
     def validation_step(self, batch, batch_nb):
         """
         We calculate the ``validation loss'' by splitting each song into
@@ -352,6 +399,7 @@ class XUMXManager(System):
             batch_tmp = [
                 batch[0][Ellipsis, sp : sp + dur_samples],
                 batch[1][Ellipsis, sp : sp + dur_samples],
+                batch[2],
             ]
             loss_tmp += self.common_step(batch_tmp, batch_nb, train=False)
             cnt += 1
@@ -373,14 +421,25 @@ def main(conf, args):
 
     # Load Datasets
     train_dataset, valid_dataset = dataloader.load_datasets(parser, args)
+    # print(train_dataset.__getitem__(0)[0].shape,train_dataset.__getitem__(0)[1].shape,train_dataset.__getitem__(0)[2].shape)
+    # print(train_dataset.__getitem__(0)[0].device,train_dataset.__getitem__(0)[1].device,train_dataset.__getitem__(0)[2].device)
+
     dataloader_kwargs = (
         {"num_workers": args.num_workers, "pin_memory": True} if torch.cuda.is_available() else {}
     )
     train_sampler = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, **dataloader_kwargs
     )
+
+    # for mix, target, mu in train_sampler:
+    #     print(mu.shape)
+    #     break
+
+    # print(next(train_sampler).__getitem__(0)[2])
+    # print(dir(train_sampler.dataset))
     valid_sampler = torch.utils.data.DataLoader(valid_dataset, batch_size=1, **dataloader_kwargs)
 
+    # return
     # Define model and optimizer
     if args.pretrained is not None:
         scaler_mean = None
@@ -390,7 +449,7 @@ def main(conf, args):
 
     max_bin = bandwidth_to_max_bin(train_dataset.sample_rate, args.in_chan, args.bandwidth)
 
-    x_unmix = XUMX(
+    mu_x_unmix = MU_XUMX(
         window_length=args.window_length,
         input_mean=scaler_mean,
         input_scale=scaler_std,
@@ -407,7 +466,7 @@ def main(conf, args):
     )
 
     optimizer = make_optimizer(
-        x_unmix.parameters(), lr=args.lr, optimizer="adam", weight_decay=args.weight_decay
+        mu_x_unmix.parameters(), lr=args.lr, optimizer="adam", weight_decay=args.weight_decay
     )
 
     # Define scheduler
@@ -433,8 +492,8 @@ def main(conf, args):
         loss_use_multidomain=args.loss_use_multidomain,
         mix_coef=args.mix_coef,
     )
-    system = XUMXManager(
-        model=x_unmix,
+    system = MU_XUMXManager(
+        model=mu_x_unmix,
         loss_func=loss_func,
         optimizer=optimizer,
         train_loader=train_sampler,

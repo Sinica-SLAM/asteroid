@@ -89,17 +89,17 @@ if [[ $stage -le 1 ]]; then
 	cp logs/train_${tag}.log $expdir/train.log
 fi
 
-if [[ $stage -le 2 ]]; then
-	echo "Stage 2: Evaluation"
-  if [[ $eval_use_gpu -lt 0 ]]; then
-    $python_path eval.py \
-    --no-cuda \
-    --root $musdb18_dir \
-    --outdir ${expdir} | tee logs/eval_${tag}.log
-  else
-    CUDA_VISIBLE_DEVICES=$id $python_path eval.py \
-    --root $musdb18_dir \
-    --outdir ${expdir} | tee logs/eval_${tag}.log
-  fi
-  cp logs/eval_${tag}.log $expdir/eval.log
-fi
+# if [[ $stage -le 2 ]]; then
+# 	echo "Stage 2: Evaluation"
+#   if [[ $eval_use_gpu -lt 0 ]]; then
+#     $python_path eval.py \
+#     --no-cuda \
+#     --root $musdb18_dir \
+#     --outdir ${expdir} | tee logs/eval_${tag}.log
+#   else
+#     CUDA_VISIBLE_DEVICES=$id $python_path eval.py \
+#     --root $musdb18_dir \
+#     --outdir ${expdir} | tee logs/eval_${tag}.log
+#   fi
+#   cp logs/eval_${tag}.log $expdir/eval.log
+# fi
