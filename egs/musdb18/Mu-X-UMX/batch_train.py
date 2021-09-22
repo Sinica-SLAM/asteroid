@@ -53,7 +53,7 @@ def get_statistics(args, dataset):
     dataset_scaler.segment = False
     pbar = tqdm.tqdm(range(len(dataset_scaler)))
     for ind in pbar:
-        x, *_ = dataset_scaler[ind]
+        x, _, _ = dataset_scaler[ind]
         pbar.set_description("Compute dataset statistics")
         X = spec(x[None, ...])[0]
         scaler.partial_fit(np.squeeze(X))
@@ -400,7 +400,6 @@ class MU_XUMXManager(System):
                 batch[0][Ellipsis, sp : sp + dur_samples],
                 batch[1][Ellipsis, sp : sp + dur_samples],
                 batch[2],
-                batch[3]
             ]
             loss_tmp += self.common_step(batch_tmp, batch_nb, train=False)
             cnt += 1
@@ -422,6 +421,9 @@ def main(conf, args):
 
     # Load Datasets
     train_dataset, valid_dataset = dataloader.load_datasets(parser, args)
+    # print(train_dataset.__getitem__(0)[0].shape,train_dataset.__getitem__(0)[1].shape,train_dataset.__getitem__(0)[2].shape)
+    # print(train_dataset.__getitem__(0)[0].device,train_dataset.__getitem__(0)[1].device,train_dataset.__getitem__(0)[2].device)
+
     dataloader_kwargs = (
         {"num_workers": args.num_workers, "pin_memory": True} if torch.cuda.is_available() else {}
     )

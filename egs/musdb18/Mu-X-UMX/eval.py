@@ -13,6 +13,7 @@ from asteroid.complex_nn import torch_complex_from_magphase
 import os
 import warnings
 import sys
+from local import dataloader
 
 
 def load_model(model_name, device="cpu"):
@@ -32,7 +33,8 @@ def istft(X, rate=44100, n_fft=4096, n_hopsize=1024):
 
 def separate(
     audio,
-    x_umx_target,
+    mu_vec,
+    mu_x_umx_target,
     instruments,
     niter=1,
     softmask=False,
@@ -49,7 +51,7 @@ def separate(
         mixture audio
 
     x_umx_target: asteroid.models
-        X-UMX model used for separating
+        MU_X-UMX model used for separating
 
     instruments: list
         The list of instruments, e.g., ["bass", "drums", "vocals"]
@@ -82,11 +84,12 @@ def separate(
 
     # convert numpy audio to torch
     audio_torch = torch.tensor(audio.T[None, ...]).float().to(device)
+    mu_vec = mu_vec.to(device)
 
     source_names = []
     V = []
-
-    masked_tf_rep, _ = x_umx_target(audio_torch)
+    # print(audio_torch.shape,mu_vec.shape)
+    masked_tf_rep, _ = mu_x_umx_target(audio_torch, mu_vec)
     # shape: (Sources, frames, batch, channels, fbin)
 
     for j, target in enumerate(instruments):
@@ -101,7 +104,7 @@ def separate(
     V = np.transpose(np.array(V), (1, 3, 2, 0))
 
     # convert to complex numpy type
-    tmp = x_umx_target.encoder(audio_torch)
+    tmp = mu_x_umx_target.encoder(audio_torch)
     X = torch_complex_from_magphase(tmp[0].permute(1, 2, 3, 0), tmp[1])
     X = X.detach().cpu().numpy()
     X = X[0].transpose(2, 1, 0)
@@ -116,9 +119,9 @@ def separate(
     for j, name in enumerate(source_names):
         audio_hat = istft(
             Y[..., j].T,
-            rate=x_umx_target.sample_rate,
-            n_fft=x_umx_target.in_chan,
-            n_hopsize=x_umx_target.n_hop,
+            rate=mu_x_umx_target.sample_rate,
+            n_fft=mu_x_umx_target.in_chan,
+            n_hopsize=mu_x_umx_target.n_hop,
         )
         estimates[name] = audio_hat.T
 
@@ -174,14 +177,11 @@ def eval_main(
 ):
 
     model_name = os.path.abspath(model_name)
-    if not (os.path.exists(model_name)):
-        outdir = os.path.abspath("./results_using_pre-trained")
-        model_name = "r-sawata/MU_XUMX_MUSDB18_music_separation"
-    else:
-        outdir = os.path.join(
-            os.path.abspath(outdir),
-            "EvaluateResults_musdb18_testdata",
-        )
+    print(model_name)
+    outdir = os.path.join(
+        os.path.abspath(outdir),
+        "EvaluateResults_musdb18_testdata",
+    )
     Path(outdir).mkdir(exist_ok=True, parents=True)
     print("Evaluated results will be saved in:\n {}".format(outdir), file=sys.stderr)
 
@@ -190,11 +190,24 @@ def eval_main(
     model, instruments = load_model(model_name, device)
 
     test_dataset = musdb.DB(root=root, subsets="test", is_wav=True)
+
+    # Load mu vectors data 
+    song_names = [song_name for _, _, _, song_name in dataloader.load_test_datasets(args.train_dir, args.sources)]
+    mu_vec_data = dataloader.load_test_datasets(args.train_dir, args.sources)
+
     results = museval.EvalStore()
     Path(outdir).mkdir(exist_ok=True, parents=True)
     txtout = os.path.join(outdir, "results.txt")
     fp = open(txtout, "w")
     for track in test_dataset:
+        
+        # print(track.name)
+        # print(song_names.index(track.name))
+        mu_vec = mu_vec_data.__getitem__(song_names.index(track.name))[-2]
+        # Unsqueeze for the dim of batch
+        if len(mu_vec.shape) < 4 :
+            mu_vec = mu_vec.unsqueeze(0)
+
         input_file = os.path.join(root, "test", track.name, "mixture.wav")
 
         # handling an input audio path
@@ -225,6 +238,7 @@ def eval_main(
 
         estimates = separate(
             audio,
+            mu_vec,
             model,
             instruments,
             niter=niter,
@@ -278,6 +292,14 @@ if __name__ == "__main__":
 
     parser.add_argument(
         "--no-cuda", action="store_true", default=False, help="disables CUDA inference"
+    )
+
+    parser.add_argument(
+        "--train_dir", default='./data', help="Data path"
+    )
+
+    parser.add_argument(
+        "--sources", default=["bass","drums","vocals","other"], help="Sources"
     )
 
     args, _ = parser.parse_known_args()

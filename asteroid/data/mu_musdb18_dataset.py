@@ -201,7 +201,7 @@ class MU_MUSDB18Dataset(torch.utils.data.Dataset):
                 [wav for src, wav in audio_sources.items() if src in self.targets], dim=0
             )
 
-        return audio_mix, audio_sources, mu_vectors
+        return audio_mix, audio_sources, mu_vectors, song_name
 
     def __len__(self):
         return len(self.tracks) * self.samples_per_track
@@ -211,7 +211,7 @@ class MU_MUSDB18Dataset(torch.utils.data.Dataset):
         p = Path(self.root, self.split)
 
         # Random toy
-        # import random
+        import random
         files = list(p.iterdir())
         # files = random.sample(files,20)
 

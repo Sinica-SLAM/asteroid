@@ -6,7 +6,7 @@ from torch.nn import LSTM, Linear, BatchNorm1d, Parameter
 from .base_models import BaseModel
 
 
-class MU_XUMX(BaseModel):
+class BATCH_MU_XUMX(BaseModel):
     r"""CrossNet-Open-Unmix (X-UMX) for Music Source Separation introduced in [1].
         There are two notable contributions with no effect on inference:
             a) Multi Domain Losses
@@ -309,19 +309,23 @@ class _InstrumentBackboneEnc(nn.Module):
 
         self.max_bin = nb_bins
         self.hidden_size = hidden_size
-        self.film = Film(mu_vec_size, self.max_bin)
         self.enc = nn.Sequential(
             Linear(self.max_bin * nb_channels, hidden_size, bias=False),
+            BatchNorm1d(hidden_size),
+        )
+        self.film = nn.Sequential(
+            Film(mu_vec_size, hidden_size, bias=False),
             BatchNorm1d(hidden_size),
         )
 
     def forward(self, x, mu_vec, shapes):
         nb_frames, nb_samples, nb_channels, _ = shapes
 
-        mu_vec = mu_vec.unsqueeze(0) #(1, batch, channel, mu_vec_size)
-        x = self.film(x, mu_vec)
         x = self.enc(x.reshape(-1, nb_channels * self.max_bin))
         x = x.reshape(nb_frames, nb_samples, self.hidden_size)
+
+        mu_vec = mu_vec.reshape(1,nb_samples,-1)
+        x = self.film(x, mu_vec)
 
         # squash range to [-1, 1]
         x = torch.tanh(x)
@@ -348,7 +352,6 @@ class _InstrumentBackboneDec(nn.Module):
     ):
         super().__init__()
         self.nb_output_bins = nb_output_bins
-        self.film = Film(mu_vec_size, hidden_size * 2)
         self.dec = nn.Sequential(
             Linear(in_features=hidden_size * 2, out_features=hidden_size, bias=False),
             BatchNorm1d(hidden_size),
@@ -358,14 +361,20 @@ class _InstrumentBackboneDec(nn.Module):
             ),
             BatchNorm1d(self.nb_output_bins * nb_channels),
         )
+        self.film = nn.Sequential(
+            Film(mu_vec_size, self.nb_output_bins * nb_channels, bias=False),
+            BatchNorm1d(self.nb_output_bins * nb_channels),
+        )
 
     def forward(self, x, mu_vec, shapes):
         nb_frames, nb_samples, nb_channels, _ = shapes
-
-        mu_vec = mu_vec.transpose(0, 1) #(channel, batch, mu_vec_size)
-        x = self.film(x, mu_vec)
+        
         x = self.dec(x.reshape(-1, x.shape[-1]))
         x = x.reshape(nb_frames, nb_samples, nb_channels, self.nb_output_bins)
+
+        mu_vec = mu_vec.reshape(1,nb_samples,-1)
+        x = self.film(x, mu_vec)
+        
         return x
 
 
