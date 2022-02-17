@@ -6,7 +6,7 @@ from torch.nn import LSTM, Linear, BatchNorm1d, Parameter
 from .base_models import BaseModel
 
 
-class XUMX(BaseModel):
+class MU_XUMX(BaseModel):
     r"""CrossNet-Open-Unmix (X-UMX) for Music Source Separation introduced in [1].
         There are two notable contributions with no effect on inference:
             a) Multi Domain Losses
@@ -53,6 +53,7 @@ class XUMX(BaseModel):
         in_chan=4096,
         n_hop=1024,
         hidden_size=512,
+        mu_vec_size=192,
         nb_channels=2,
         sample_rate=44100,
         nb_layers=3,
@@ -79,6 +80,7 @@ class XUMX(BaseModel):
         else:
             self.max_bin = self.nb_output_bins
         self.hidden_size = hidden_size
+        self.mu_vec_size = mu_vec_size
         self.spec_power = spec_power
 
         if input_mean is not None:
@@ -103,10 +105,12 @@ class XUMX(BaseModel):
         src_dec = {}
         mean_scale = {}
         for src in sources:
+
             # Define Enc.
             src_enc[src] = _InstrumentBackboneEnc(
                 nb_bins=self.max_bin,
                 hidden_size=hidden_size,
+                mu_vec_size=mu_vec_size,
                 nb_channels=nb_channels,
             )
 
@@ -124,6 +128,7 @@ class XUMX(BaseModel):
             src_dec[src] = _InstrumentBackboneDec(
                 nb_output_bins=self.nb_output_bins,
                 hidden_size=hidden_size,
+                mu_vec_size=mu_vec_size,
                 nb_channels=nb_channels,
             )
 
@@ -143,7 +148,7 @@ class XUMX(BaseModel):
         # Define spectral decoder
         self.decoder = _ISTFT(window=stft.window, n_fft=in_chan, hop_length=n_hop, center=True)
 
-    def forward(self, wav):
+    def forward(self, wav, mu_vec):
         """Model forward
 
         Args:
@@ -154,15 +159,19 @@ class XUMX(BaseModel):
                 X-UMX's output of shape $(sources, frames, batch_size, channels, bins)$
             time_signals (torch.Tensor): estimated time signals of shape $(sources, batch_size, channels, time_length)$ if `return_time_signals` is `True`
         """
+        # print(wav.shape)
         
         # Transform
         mixture, ang = self.encoder(wav)
+        # print('spectrogram:',mixture.shape,'phase:',ang.shape)
 
         # Estimate masks
-        est_masks = self.forward_masker(mixture.clone())
+        est_masks = self.forward_masker(mixture.clone(), mu_vec)
+        # print('est_masks',est_masks.shape)
 
         # Apply masks to mixture
         masked_mixture = self.apply_masks(mixture, est_masks)
+        # print('masked_mixture',masked_mixture.shape)
 
         # Inverse Transform
         if self._return_time_signals:
@@ -171,9 +180,11 @@ class XUMX(BaseModel):
         else:
             time_signals = None
 
+        # print('time_signals',time_signals.shape)
+
         return masked_mixture, time_signals
 
-    def forward_masker(self, input_spec):
+    def forward_masker(self, input_spec, mu_vec):
         shapes = input_spec.data.shape
         # crop
         x = input_spec[..., : self.max_bin]
@@ -182,15 +193,19 @@ class XUMX(BaseModel):
         for i in range(1, len(self.sources)):
             inputs.append(x.clone())
 
+        # Split mu vectors to the ccorresponding sources
+        mu_vectors = [mu_vec[:,i,:,:] for i in range(len(self.sources))]
+
         # shift and scale input to mean=0 std=1 (across all bins)
         # and encode to (nb_frames*nb_samples, hidden_size)
         for i, src in enumerate(self.sources):
             inputs[i] += self.mean_scale["input_mean_{}".format(src)]
             inputs[i] *= self.mean_scale["input_scale_{}".format(src)]
-            inputs[i] = self.layer_enc[src](inputs[i], shapes)
+            inputs[i] = self.layer_enc[src](inputs[i], mu_vectors[i], shapes)
 
         # 1st Bridging operation and apply 3-layers of stacked LSTM
         cross_1 = sum(inputs) / len(self.sources)
+        # print('cross_1',cross_1.shape)
         cross_2 = 0.0
         for i, src in enumerate(self.sources):
             tmp_lstm_out = self.layer_lstm[src](cross_1)
@@ -200,8 +215,8 @@ class XUMX(BaseModel):
         # 2nd Bridging operation
         cross_2 /= len(self.sources)
         mask_list = []
-        for src in self.sources:
-            x_tmp = self.layer_dec[src](cross_2, shapes)
+        for i, src in enumerate(self.sources):
+            x_tmp = self.layer_dec[src](cross_2, mu_vectors[i], shapes)
             x_tmp *= self.mean_scale["output_scale_{}".format(src)]
             x_tmp += self.mean_scale["output_mean_{}".format(src)]
             mask_list.append(F.relu(x_tmp))
@@ -242,6 +257,35 @@ class XUMX(BaseModel):
         }
         return model_args
 
+class Film(nn.Module):
+    """Feature-wise Linear Modulation.
+
+    Args:
+        nb_bins (int): Number of frequency bins of the mixture.
+        hidden_size (int): Hidden size parameter of LSTM layers.
+        nb_channels (int): set number of channels for model
+            (1 for mono (spectral downmix is applied,) 2 for stereo).
+    """
+
+    def __init__(
+        self,
+        in_features,
+        out_features,
+        bias=True
+    ):
+        super().__init__()
+
+        self.weight = nn.Linear(in_features, out_features)
+        self.bias = nn.Linear(in_features, out_features) if bias else None
+
+    def forward(self, x, mu_vec):
+
+        film_weight = self.weight(mu_vec)
+        film_bias = self.bias(mu_vec) if self.bias else 0 
+        x = film_weight * x + film_bias
+
+        return x
+
 
 class _InstrumentBackboneEnc(nn.Module):
     """Encoder structure that maps the mixture magnitude spectrogram to
@@ -257,6 +301,7 @@ class _InstrumentBackboneEnc(nn.Module):
     def __init__(
         self,
         nb_bins,
+        mu_vec_size=192,
         hidden_size=512,
         nb_channels=2,
     ):
@@ -264,13 +309,17 @@ class _InstrumentBackboneEnc(nn.Module):
 
         self.max_bin = nb_bins
         self.hidden_size = hidden_size
+        self.film = Film(mu_vec_size, self.max_bin)
         self.enc = nn.Sequential(
             Linear(self.max_bin * nb_channels, hidden_size, bias=False),
             BatchNorm1d(hidden_size),
         )
 
-    def forward(self, x, shapes):
+    def forward(self, x, mu_vec, shapes):
         nb_frames, nb_samples, nb_channels, _ = shapes
+
+        mu_vec = mu_vec.unsqueeze(0) #(1, batch, channel, mu_vec_size)
+        x = self.film(x, mu_vec)
         x = self.enc(x.reshape(-1, nb_channels * self.max_bin))
         x = x.reshape(nb_frames, nb_samples, self.hidden_size)
 
@@ -293,11 +342,13 @@ class _InstrumentBackboneDec(nn.Module):
     def __init__(
         self,
         nb_output_bins,
+        mu_vec_size=192,
         hidden_size=512,
         nb_channels=2,
     ):
         super().__init__()
         self.nb_output_bins = nb_output_bins
+        self.film = Film(mu_vec_size, hidden_size * 2)
         self.dec = nn.Sequential(
             Linear(in_features=hidden_size * 2, out_features=hidden_size, bias=False),
             BatchNorm1d(hidden_size),
@@ -308,8 +359,11 @@ class _InstrumentBackboneDec(nn.Module):
             BatchNorm1d(self.nb_output_bins * nb_channels),
         )
 
-    def forward(self, x, shapes):
+    def forward(self, x, mu_vec, shapes):
         nb_frames, nb_samples, nb_channels, _ = shapes
+
+        mu_vec = mu_vec.transpose(0, 1) #(channel, batch, mu_vec_size)
+        x = self.film(x, mu_vec)
         x = self.dec(x.reshape(-1, x.shape[-1]))
         x = x.reshape(nb_frames, nb_samples, nb_channels, self.nb_output_bins)
         return x
